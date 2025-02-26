@@ -2,7 +2,7 @@
 
 > Made by Cline(AI)
 
-A Deno application that takes screenshots at regular intervals, analyzes them using Gemini Flash, and logs screen activity information.
+A Deno application that takes screenshots at regular intervals, analyzes them using Gemini Flash, logs screen activity information, and can send summaries to Obsidian.
 
 ## Features
 
@@ -15,6 +15,7 @@ A Deno application that takes screenshots at regular intervals, analyzes them us
   - Screenshot path
   - Open applications and window titles
   - AI-generated description of screen content
+- Sends screen analysis to Obsidian daily notes (optional)
 
 ## Prerequisites
 
@@ -39,6 +40,20 @@ cp .env.example .env
 ```
 
 Then edit the `.env` file to add your API key.
+
+### Obsidian Integration (Optional)
+
+To send screen analysis to Obsidian daily notes:
+
+1. Make sure you have [Obsidian](https://obsidian.md/) installed
+2. Install the [Advanced URI plugin](https://obsidian.md/plugins?id=obsidian-advanced-uri) in Obsidian
+3. Set your Obsidian vault name in the `.env` file:
+
+```
+OBSIDIAN_VAULT_NAME=your_vault_name_here
+```
+
+The application will automatically append the screen analysis to your daily note with a timestamp.
 
 ## Usage
 

@@ -1,6 +1,7 @@
 import { ensureDir } from "std/fs";
 import { join } from "std/path";
 import { load } from "std/dotenv";
+import { format } from "std/datetime";
 
 // Load environment variables from .env file if it exists
 try {
@@ -243,8 +244,7 @@ async function analyzeScreenshot(
     .join(", ");
 
   const prompt = `
-スクリーンショットをアップロードしていただければ、詳しく分析して説明します。
-現在開いているアプリケーションのリスト (${appsList}) についても触れながら、最前面のアプリケーションとその内容、画面上のアクティビティを詳しく説明します。
+スクリーンショットと現在開いているアプリケーションのリスト (${appsList})、特に表示されているコンテンツについて触れながら、ユーザーが何をしているか日本語で簡潔に分析してください。表示されていないコンテンツや、不適切なコンテンツは除外してください。
 `;
 
   const response = await fetch(
@@ -316,6 +316,55 @@ async function logActivity(
 }
 
 /**
+ * Sends the screen analysis to Obsidian using the advanced-uri protocol
+ * @param analysis Gemini's analysis of the screenshot
+ * @returns Whether the operation was successful
+ */
+async function sendToObsidian(analysis: string): Promise<boolean> {
+  const OBSIDIAN_VAULT_NAME = Deno.env.get("OBSIDIAN_VAULT_NAME");
+
+  if (!OBSIDIAN_VAULT_NAME) {
+    console.warn(
+      "OBSIDIAN_VAULT_NAME environment variable is not set. Skipping Obsidian integration."
+    );
+    return false;
+  }
+
+  try {
+    // Format current time as HH:MM
+    const now = new Date();
+    const currentTime = format(now, "HH:mm");
+
+    // Prepare the memo text (the analysis)
+    // Encode the analysis for use in a URL
+    const encodedAnalysis = encodeURIComponent(analysis);
+
+    // Create the Obsidian advanced-uri command
+    const obsidianCommand = `open --background "obsidian://advanced-uri?vault=${OBSIDIAN_VAULT_NAME}&daily=true&mode=append&data=%23%23%20${currentTime}%0D%0A${encodedAnalysis}"`;
+
+    console.log(obsidianCommand);
+
+    // Execute the command
+    const command = new Deno.Command("bash", {
+      args: ["-c", obsidianCommand],
+    });
+
+    const { code } = await command.output();
+
+    if (code !== 0) {
+      console.error(`Failed to send to Obsidian, exit code: ${code}`);
+      return false;
+    }
+
+    console.log("Screen analysis sent to Obsidian successfully");
+    return true;
+  } catch (error) {
+    console.error("Error sending to Obsidian:", error);
+    return false;
+  }
+}
+
+/**
  * Main function to capture and analyze screen activity
  */
 async function captureScreenActivity(): Promise<void> {
@@ -343,6 +392,9 @@ async function captureScreenActivity(): Promise<void> {
       openApps,
       analysis
     );
+
+    // Send the analysis to Obsidian
+    await sendToObsidian(analysis);
 
     console.log("Screen activity capture completed successfully");
   } catch (error) {
