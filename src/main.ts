@@ -43,6 +43,45 @@ async function takeScreenshot(): Promise<string> {
 }
 
 /**
+ * Optimizes an image by adjusting its quality and size for API transmission
+ * @param imagePath Path to the original image
+ * @returns Path to the optimized image
+ */
+async function optimizeImage(imagePath: string): Promise<string> {
+  // Create a new filename for the optimized image
+  const pathParts = imagePath.split(".");
+  const extension = pathParts.pop();
+  const optimizedPath = `${pathParts.join(".")}_optimized.${extension}`;
+
+  // Use sips (built into macOS) to resize the image while maintaining aspect ratio
+  // This will reduce the file size significantly
+  const resizeCommand = new Deno.Command("sips", {
+    args: [
+      "--resampleWidth",
+      "1200", // Resize to 1200px width (adjust as needed)
+      "--setProperty",
+      "formatOptions",
+      "80", // Set quality to 80% (for JPG)
+      imagePath,
+      "--out",
+      optimizedPath,
+    ],
+  });
+
+  const { code } = await resizeCommand.output();
+
+  if (code !== 0) {
+    console.warn(
+      `Failed to optimize image, using original. Exit code: ${code}`
+    );
+    return imagePath; // Return original path if optimization fails
+  }
+
+  console.log(`Image optimized and saved to ${optimizedPath}`);
+  return optimizedPath;
+}
+
+/**
  * Gets information about currently open applications
  * @returns Array of application information objects
  */
@@ -175,7 +214,9 @@ async function analyzeScreenshot(
     throw new Error("GEMINI_API_KEY environment variable is not set");
   }
 
-  const imageData = await Deno.readFile(imagePath);
+  // Optimize the image before sending to API
+  const optimizedImagePath = await optimizeImage(imagePath);
+  const imageData = await Deno.readFile(optimizedImagePath);
 
   // Convert binary data to base64 in chunks to avoid stack overflow
   const bytes = new Uint8Array(imageData);
@@ -246,11 +287,13 @@ async function analyzeScreenshot(
 /**
  * Logs the screen activity information
  * @param screenshotPath Path to the screenshot
+ * @param optimizedScreenshotPath Path to the optimized screenshot (if available)
  * @param apps List of open applications
  * @param analysis Gemini's analysis of the screenshot
  */
 async function logActivity(
   screenshotPath: string,
+  optimizedScreenshotPath: string | null,
   apps: Array<{ name: string; title?: string; isFrontmost: boolean }>,
   analysis: string
 ): Promise<void> {
@@ -261,6 +304,7 @@ async function logActivity(
   const logEntry = {
     timestamp,
     screenshot: screenshotPath,
+    optimizedScreenshot: optimizedScreenshotPath || undefined,
     openApplications: apps,
     screenAnalysis: analysis,
   };
@@ -285,12 +329,20 @@ async function captureScreenActivity(): Promise<void> {
     const openApps = await getOpenApplications();
     console.log("Open applications:", openApps);
 
+    // Optimize the screenshot for analysis
+    const optimizedScreenshotPath = await optimizeImage(screenshotPath);
+
     // Analyze screenshot with Gemini
     const analysis = await analyzeScreenshot(screenshotPath, openApps);
     console.log("Screen analysis:", analysis);
 
     // Log the activity
-    await logActivity(screenshotPath, openApps, analysis);
+    await logActivity(
+      screenshotPath,
+      optimizedScreenshotPath,
+      openApps,
+      analysis
+    );
 
     console.log("Screen activity capture completed successfully");
   } catch (error) {
