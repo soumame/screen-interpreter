@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "lib": ["deno.window"],
+    "strict": true
+  },
+  "tasks": {
+    "start": "deno run --allow-env --allow-read --allow-write --allow-run src/main.ts"
+  },
+  "importMap": "./import_map.json"
+}
