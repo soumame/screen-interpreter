@@ -1,4 +1,4 @@
-import { ensureDir } from "std/fs";
+import { ensureDir, exists } from "std/fs";
 import { join } from "std/path";
 import { load } from "std/dotenv";
 import { format } from "std/datetime";
@@ -15,10 +15,64 @@ try {
 const SCREENSHOTS_DIR = "./screenshots";
 const LOGS_DIR = "./logs";
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
+const AFK_TIMEOUT_MINUTES = parseInt(
+  Deno.env.get("AFK_TIMEOUT_MINUTES") || "5",
+  10
+);
 
 // Ensure directories exist
 await ensureDir(SCREENSHOTS_DIR);
 await ensureDir(LOGS_DIR);
+
+/**
+ * Gets the time of the last user input event in milliseconds since epoch
+ * @returns Time of last input in milliseconds
+ */
+async function getLastInputTime(): Promise<number> {
+  try {
+    // Use ioreg to get HID (Human Interface Device) System events
+    const command = new Deno.Command("ioreg", {
+      args: ["-c", "IOHIDSystem"],
+      stdout: "piped",
+    });
+
+    const { stdout } = await command.output();
+    const output = new TextDecoder().decode(stdout);
+
+    // Look for HIDIdleTime which represents time since last input in nanoseconds
+    const match = output.match(/"HIDIdleTime" = (\d+)/);
+
+    if (match && match[1]) {
+      // Convert nanoseconds to milliseconds and subtract from current time
+      const idleTimeNs = parseInt(match[1], 10);
+      const idleTimeMs = idleTimeNs / 1000000; // Convert nanoseconds to milliseconds
+      const lastInputTime = Date.now() - idleTimeMs;
+
+      return lastInputTime;
+    }
+
+    // If we couldn't get the idle time, return current time (assume user is active)
+    return Date.now();
+  } catch (error) {
+    console.error("Error getting last input time:", error);
+    // In case of error, return current time (assume user is active)
+    return Date.now();
+  }
+}
+
+/**
+ * Checks if the user is currently AFK (Away From Keyboard)
+ * @returns True if user is AFK, false otherwise
+ */
+async function isUserAFK(): Promise<boolean> {
+  const lastInputTime = await getLastInputTime();
+  const currentTime = Date.now();
+  const idleTimeMinutes = (currentTime - lastInputTime) / (1000 * 60);
+
+  console.log(`User has been idle for ${idleTimeMinutes.toFixed(2)} minutes`);
+
+  return idleTimeMinutes >= AFK_TIMEOUT_MINUTES;
+}
 
 /**
  * Takes a screenshot and saves it to the screenshots directory
@@ -202,14 +256,128 @@ async function getOpenApplications(): Promise<
 }
 
 /**
+ * Reads the most recent activity log
+ * @returns The most recent activity log entry or null if none exists
+ */
+async function getRecentActivity(): Promise<any | null> {
+  // Get the current date in YYYY-MM-DD format
+  const today = new Date().toISOString().split("T")[0];
+  const yesterdayDate = new Date();
+  yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+  const yesterday = yesterdayDate.toISOString().split("T")[0];
+
+  // Check today's log first, then yesterday's
+  const todayLogPath = join(LOGS_DIR, `activity_${today}.log`);
+  const yesterdayLogPath = join(LOGS_DIR, `activity_${yesterday}.log`);
+
+  let logPath = "";
+  if (await exists(todayLogPath)) {
+    logPath = todayLogPath;
+  } else if (await exists(yesterdayLogPath)) {
+    logPath = yesterdayLogPath;
+  } else {
+    return null; // No recent logs found
+  }
+
+  try {
+    const logContent = await Deno.readTextFile(logPath);
+    // Split by newlines and get the last non-empty entry
+    const entries = logContent.split("\n").filter((line) => line.trim());
+    if (entries.length === 0) return null;
+
+    // Parse the most recent entry
+    return JSON.parse(entries[entries.length - 1]);
+  } catch (error) {
+    console.error("Error reading recent activity log:", error);
+    return null;
+  }
+}
+
+/**
+ * Compares previous and current activities to determine if the user is continuing the same task
+ * @param previousActivity The previous activity log entry
+ * @param currentApps List of currently open applications
+ * @returns Object containing continuity information
+ */
+function analyzeActivityContinuity(
+  previousActivity: any,
+  currentApps: Array<{ name: string; title?: string; isFrontmost: boolean }>
+): {
+  isContinuing: boolean;
+  commonApps: string[];
+  frontmostChanged: boolean;
+  timeSinceLastActivity: string;
+} {
+  if (!previousActivity) {
+    return {
+      isContinuing: false,
+      commonApps: [],
+      frontmostChanged: true,
+      timeSinceLastActivity: "N/A",
+    };
+  }
+
+  // Get previous apps and frontmost app
+  const previousApps = previousActivity.openApplications;
+  const previousFrontmost = previousApps.find(
+    (app: any) => app.isFrontmost
+  )?.name;
+  const currentFrontmost = currentApps.find((app) => app.isFrontmost)?.name;
+
+  // Find common apps
+  const previousAppNames = previousApps.map((app: any) => app.name);
+  const currentAppNames = currentApps.map((app) => app.name);
+  const commonApps = previousAppNames.filter((name: string) =>
+    currentAppNames.includes(name)
+  );
+
+  // Calculate time since last activity
+  const previousTime = new Date(previousActivity.timestamp);
+  const currentTime = new Date();
+  const timeDiffMs = currentTime.getTime() - previousTime.getTime();
+  const timeDiffMinutes = Math.floor(timeDiffMs / (1000 * 60));
+  let timeSinceLastActivity = "";
+
+  if (timeDiffMinutes < 60) {
+    timeSinceLastActivity = `${timeDiffMinutes} 分前`;
+  } else {
+    const hours = Math.floor(timeDiffMinutes / 60);
+    const minutes = timeDiffMinutes % 60;
+    timeSinceLastActivity = `${hours} 時間 ${minutes} 分前`;
+  }
+
+  // Determine if user is likely continuing the same task
+  // Consider it continuing if:
+  // 1. At least 70% of previous apps are still open
+  // 2. Time difference is less than 2 hours
+  const appContinuityRatio = commonApps.length / previousApps.length;
+  const isContinuing =
+    appContinuityRatio >= 0.7 && timeDiffMs < 2 * 60 * 60 * 1000;
+
+  return {
+    isContinuing,
+    commonApps,
+    frontmostChanged: previousFrontmost !== currentFrontmost,
+    timeSinceLastActivity,
+  };
+}
+
+/**
  * Analyzes a screenshot using Gemini Flash API
  * @param imagePath Path to the screenshot image
  * @param apps List of open applications
+ * @param continuityInfo Information about activity continuity
  * @returns Analysis result from Gemini
  */
 async function analyzeScreenshot(
   imagePath: string,
-  apps: Array<{ name: string; title?: string; isFrontmost: boolean }>
+  apps: Array<{ name: string; title?: string; isFrontmost: boolean }>,
+  continuityInfo?: {
+    isContinuing: boolean;
+    commonApps: string[];
+    frontmostChanged: boolean;
+    timeSinceLastActivity: string;
+  }
 ): Promise<string> {
   if (!GEMINI_API_KEY) {
     throw new Error("GEMINI_API_KEY environment variable is not set");
@@ -243,8 +411,29 @@ async function analyzeScreenshot(
     })
     .join(", ");
 
+  // Add continuity information to the prompt if available
+  let continuityPrompt = "";
+  if (continuityInfo) {
+    if (continuityInfo.isContinuing) {
+      continuityPrompt = `
+ユーザーは${
+        continuityInfo.timeSinceLastActivity
+      }前のアクティビティを継続している可能性が高いです。
+前回と共通のアプリケーション: ${continuityInfo.commonApps.join(", ")}
+フォーカスしているアプリケーションの変更: ${
+        continuityInfo.frontmostChanged ? "あり" : "なし"
+      }
+`;
+    } else {
+      continuityPrompt = `
+ユーザーは${continuityInfo.timeSinceLastActivity}前のアクティビティから新しいタスクに移行した可能性があります。
+`;
+    }
+  }
+
   const prompt = `
 スクリーンショットと現在開いているアプリケーションのリスト (${appsList})、特に表示されているコンテンツについて触れながら、ユーザーが何をしているか日本語で簡潔に分析してください。表示されていないコンテンツや、不適切なコンテンツは除外してください。
+${continuityPrompt}
 `;
 
   const response = await fetch(
@@ -371,6 +560,20 @@ async function captureScreenActivity(): Promise<void> {
   try {
     console.log("Starting screen activity capture...");
 
+    // Check if user is AFK
+    const afk = await isUserAFK();
+    if (afk) {
+      console.log(
+        `User is AFK (idle for ≥${AFK_TIMEOUT_MINUTES} minutes). Skipping screen interpretation.`
+      );
+      return;
+    }
+
+    console.log("User is active. Proceeding with screen interpretation...");
+
+    // Get the most recent activity
+    const recentActivity = await getRecentActivity();
+
     // Take screenshot
     const screenshotPath = await takeScreenshot();
 
@@ -378,11 +581,24 @@ async function captureScreenActivity(): Promise<void> {
     const openApps = await getOpenApplications();
     console.log("Open applications:", openApps);
 
+    // Analyze continuity with previous activity
+    const continuityInfo = recentActivity
+      ? analyzeActivityContinuity(recentActivity, openApps)
+      : undefined;
+
+    if (continuityInfo) {
+      console.log("Activity continuity analysis:", continuityInfo);
+    }
+
     // Optimize the screenshot for analysis
     const optimizedScreenshotPath = await optimizeImage(screenshotPath);
 
-    // Analyze screenshot with Gemini
-    const analysis = await analyzeScreenshot(screenshotPath, openApps);
+    // Analyze screenshot with Gemini, including continuity information
+    const analysis = await analyzeScreenshot(
+      screenshotPath,
+      openApps,
+      continuityInfo
+    );
     console.log("Screen analysis:", analysis);
 
     // Log the activity

@@ -6,7 +6,7 @@ A Deno application that takes screenshots at regular intervals, analyzes them us
 
 ## Features
 
-- Takes screenshots every 5 minutes (when set up with cron)
+- Takes screenshots at regular intervals (when set up with launchd or cron)
 - Uses macOS native commands to capture screen content
 - Retrieves information about open applications
 - Analyzes screenshots using Google's Gemini Flash API
@@ -74,17 +74,65 @@ This will:
 
 ### Setting Up Scheduled Runs
 
-To run the application every 5 minutes, you can use the provided setup script:
+To run the application at regular intervals, you can use the provided setup scripts. On macOS, it's recommended to use launchd instead of cron for better reliability.
+
+#### Using launchd (Recommended for macOS)
 
 ```bash
-./setup-cron.sh
+# First, make sure the scripts are executable
+chmod +x run_screen_interpreter.sh setup_launchd.sh
+
+# Then run the setup script
+./setup_launchd.sh
 ```
 
-This script will:
+The setup script will:
 
-- Check if Deno is installed
-- Verify if the GEMINI_API_KEY environment variable is set
-- Create a cron job to run the application every 5 minutes
+- Prompt you for how often you want to run the screen interpreter (in seconds)
+- Set up a launchd job with your specified interval
+- Create log files in the logs directory
+
+The default interval is every 15 minutes (900 seconds), but you can choose other intervals like:
+
+- Every 5 minutes: `300` seconds
+- Every hour: `3600` seconds
+- Every 2 hours: `7200` seconds
+
+To manually check if your launchd job is running:
+
+```bash
+launchctl list | grep com.screen-interpreter
+```
+
+To manually remove the launchd job:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.screen-interpreter.plist
+rm ~/Library/LaunchAgents/com.screen-interpreter.plist
+```
+
+#### Using cron (Alternative)
+
+```bash
+# First, make sure the scripts are executable
+chmod +x run_screen_interpreter.sh setup_cron.sh
+
+# Then run the setup script
+./setup_cron.sh
+```
+
+The setup script will:
+
+- Prompt you for how often you want to run the screen interpreter
+- Set up a cron job with your specified interval
+- Create log files in the logs directory
+
+The default interval is every 15 minutes, but you can choose other intervals like:
+
+- Every 5 minutes: `*/5 * * * *`
+- Every hour: `0 * * * *`
+- Every 2 hours: `0 */2 * * *`
+- Hourly from 9 AM to 5 PM, Monday to Friday: `0 9-17 * * 1-5`
 
 Alternatively, you can manually set up a cron job:
 
@@ -97,7 +145,7 @@ crontab -e
 2. Add the following line (adjust the paths as needed):
 
 ```
-*/5 * * * * cd /path/to/screen-interpreter && /path/to/deno task start
+*/15 * * * * /path/to/screen-interpreter/run_screen_interpreter.sh >> /path/to/screen-interpreter/logs/cron.log 2>&1
 ```
 
 3. Save and exit
