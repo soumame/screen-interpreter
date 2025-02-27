@@ -19,6 +19,10 @@ const AFK_TIMEOUT_MINUTES = parseInt(
   Deno.env.get("AFK_TIMEOUT_MINUTES") || "5",
   10
 );
+const SUMMARY_INTERVAL_MINUTES = parseInt(
+  Deno.env.get("SUMMARY_INTERVAL_MINUTES") || "60",
+  10
+);
 
 // Ensure directories exist
 await ensureDir(SCREENSHOTS_DIR);
@@ -294,6 +298,262 @@ async function getRecentActivity(): Promise<any | null> {
 }
 
 /**
+ * Reads activity logs from a specific time period
+ * @param startTime The start time of the period
+ * @param endTime The end time of the period
+ * @returns Array of activity log entries
+ */
+async function getActivitiesInTimeRange(
+  startTime: Date,
+  endTime: Date
+): Promise<any[]> {
+  const activities: any[] = [];
+
+  // Get all dates in the range (could span multiple days)
+  const dates: string[] = [];
+  const currentDate = new Date(startTime);
+
+  while (currentDate <= endTime) {
+    dates.push(currentDate.toISOString().split("T")[0]);
+    currentDate.setDate(currentDate.getDate() + 1);
+  }
+
+  // Read logs for each date
+  for (const date of dates) {
+    const logPath = join(LOGS_DIR, `activity_${date}.log`);
+
+    if (await exists(logPath)) {
+      try {
+        const logContent = await Deno.readTextFile(logPath);
+        const entries = logContent
+          .split("\n")
+          .filter((line) => line.trim())
+          .map((line) => JSON.parse(line));
+
+        // Filter entries by timestamp
+        const filteredEntries = entries.filter((entry) => {
+          const entryTime = new Date(entry.timestamp);
+          return entryTime >= startTime && entryTime <= endTime;
+        });
+
+        activities.push(...filteredEntries);
+      } catch (error) {
+        console.error(`Error reading activity log for ${date}:`, error);
+      }
+    }
+  }
+
+  // Sort by timestamp
+  activities.sort((a, b) => {
+    return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+  });
+
+  return activities;
+}
+
+/**
+ * Generates a summary of activities from a list of activity logs
+ * @param activities Array of activity log entries
+ * @returns Summary text
+ */
+async function generateActivitySummary(activities: any[]): Promise<string> {
+  if (!activities.length) {
+    return "この時間帯のアクティビティはありませんでした。";
+  }
+
+  if (!GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY environment variable is not set");
+  }
+
+  // Extract all screen analyses
+  const screenAnalyses = activities.map((activity) => activity.screenAnalysis);
+
+  // Create a prompt for Gemini to summarize the activities
+  const prompt = `
+以下は過去${SUMMARY_INTERVAL_MINUTES}分間のスクリーンアクティビティの分析です。これらの情報を元に、ユーザーが主に何をしていたかを簡潔に要約してください。要約は日本語で、3〜5文程度にまとめてください。
+
+${screenAnalyses.join("\n\n---\n\n")}
+`;
+
+  // Call Gemini API for summarization
+  const response = await fetch(
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" +
+      GEMINI_API_KEY,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                text: prompt,
+              },
+            ],
+          },
+        ],
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Gemini API error: ${response.status} ${errorText}`);
+  }
+
+  const result = await response.json();
+  return result.candidates[0].content.parts[0].text;
+}
+
+/**
+ * Sends an activity summary to Obsidian
+ * @param summary The summary text
+ * @param startTime The start time of the summary period
+ * @param endTime The end time of the summary period
+ * @returns Whether the operation was successful
+ */
+async function sendSummaryToObsidian(
+  summary: string,
+  startTime: Date,
+  endTime: Date
+): Promise<boolean> {
+  const OBSIDIAN_VAULT_NAME = Deno.env.get("OBSIDIAN_VAULT_NAME");
+
+  if (!OBSIDIAN_VAULT_NAME) {
+    console.warn(
+      "OBSIDIAN_VAULT_NAME environment variable is not set. Skipping Obsidian integration."
+    );
+    return false;
+  }
+
+  try {
+    // Format time range
+    const startTimeStr = format(startTime, "HH:mm");
+    const endTimeStr = format(endTime, "HH:mm");
+    const timeRange = `${startTimeStr}〜${endTimeStr}`;
+
+    // Prepare the summary text with header
+    const summaryWithHeader = `## ${timeRange} アクティビティサマリー\n${summary}`;
+
+    // Encode the summary for use in a URL
+    const encodedSummary = encodeURIComponent(summaryWithHeader);
+
+    // Create the Obsidian advanced-uri command
+    const obsidianCommand = `open --background "obsidian://advanced-uri?vault=${OBSIDIAN_VAULT_NAME}&daily=true&mode=append&data=${encodedSummary}"`;
+
+    console.log(obsidianCommand);
+
+    // Execute the command
+    const command = new Deno.Command("bash", {
+      args: ["-c", obsidianCommand],
+    });
+
+    const { code } = await command.output();
+
+    if (code !== 0) {
+      console.error(`Failed to send summary to Obsidian, exit code: ${code}`);
+      return false;
+    }
+
+    console.log("Activity summary sent to Obsidian successfully");
+    return true;
+  } catch (error) {
+    console.error("Error sending summary to Obsidian:", error);
+    return false;
+  }
+}
+
+/**
+ * Checks if it's time to generate a summary based on the last summary time
+ * @returns Whether it's time to generate a summary
+ */
+async function isTimeForSummary(): Promise<boolean> {
+  try {
+    // Path to store the last summary time
+    const lastSummaryPath = join(LOGS_DIR, "last_summary_time.txt");
+
+    // Get current time
+    const currentTime = new Date();
+
+    // If the file doesn't exist, it's the first run
+    if (!(await exists(lastSummaryPath))) {
+      // Create the file with current time
+      await Deno.writeTextFile(lastSummaryPath, currentTime.toISOString());
+      return false; // Don't generate summary on first run
+    }
+
+    // Read the last summary time
+    const lastSummaryTimeStr = await Deno.readTextFile(lastSummaryPath);
+    const lastSummaryTime = new Date(lastSummaryTimeStr);
+
+    // Calculate time difference in minutes
+    const timeDiffMinutes =
+      (currentTime.getTime() - lastSummaryTime.getTime()) / (1000 * 60);
+
+    // Check if enough time has passed
+    if (timeDiffMinutes >= SUMMARY_INTERVAL_MINUTES) {
+      // Update the last summary time
+      await Deno.writeTextFile(lastSummaryPath, currentTime.toISOString());
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    console.error("Error checking summary time:", error);
+    return false;
+  }
+}
+
+/**
+ * Generates and sends a summary of recent activities
+ */
+async function generateAndSendSummary(): Promise<void> {
+  try {
+    console.log("Checking if it's time for a summary...");
+
+    // Check if it's time to generate a summary
+    const shouldGenerateSummary = await isTimeForSummary();
+
+    if (!shouldGenerateSummary) {
+      console.log("Not time for a summary yet.");
+      return;
+    }
+
+    console.log(
+      `Generating summary for the past ${SUMMARY_INTERVAL_MINUTES} minutes...`
+    );
+
+    // Calculate time range
+    const endTime = new Date();
+    const startTime = new Date(endTime);
+    startTime.setMinutes(startTime.getMinutes() - SUMMARY_INTERVAL_MINUTES);
+
+    // Get activities in the time range
+    const activities = await getActivitiesInTimeRange(startTime, endTime);
+
+    if (activities.length === 0) {
+      console.log("No activities found in the time range.");
+      return;
+    }
+
+    console.log(`Found ${activities.length} activities in the time range.`);
+
+    // Generate summary
+    const summary = await generateActivitySummary(activities);
+    console.log("Generated summary:", summary);
+
+    // Send to Obsidian
+    await sendSummaryToObsidian(summary, startTime, endTime);
+
+    console.log("Summary generation and sending completed successfully");
+  } catch (error) {
+    console.error("Error generating or sending summary:", error);
+  }
+}
+
+/**
  * Compares previous and current activities to determine if the user is continuing the same task
  * @param previousActivity The previous activity log entry
  * @param currentApps List of currently open applications
@@ -529,7 +789,7 @@ async function sendToObsidian(analysis: string): Promise<boolean> {
     const encodedAnalysis = encodeURIComponent(analysis);
 
     // Create the Obsidian advanced-uri command
-    const obsidianCommand = `open --background "obsidian://advanced-uri?vault=${OBSIDIAN_VAULT_NAME}&daily=true&mode=append&data=%23%23%20${currentTime}%0D%0A${encodedAnalysis}"`;
+    const obsidianCommand = `open --background "obsidian://advanced-uri?vault=${OBSIDIAN_VAULT_NAME}&daily=true&mode=append&data=%23%23%23%20${currentTime}%0D%0A${encodedAnalysis}"`;
 
     console.log(obsidianCommand);
 
@@ -611,6 +871,9 @@ async function captureScreenActivity(): Promise<void> {
 
     // Send the analysis to Obsidian
     await sendToObsidian(analysis);
+
+    // Check if it's time to generate a summary and send it
+    await generateAndSendSummary();
 
     console.log("Screen activity capture completed successfully");
   } catch (error) {
