@@ -285,12 +285,25 @@ async function getRecentActivity(): Promise<any | null> {
 
   try {
     const logContent = await Deno.readTextFile(logPath);
-    // Split by newlines and get the last non-empty entry
-    const entries = logContent.split("\n").filter((line) => line.trim());
-    if (entries.length === 0) return null;
+    if (!logContent.trim()) return null;
 
-    // Parse the most recent entry
-    return JSON.parse(entries[entries.length - 1]);
+    let activities: any[] = [];
+
+    // Try to parse the content as a JSON array first (new format)
+    if (logContent.trim().startsWith("[")) {
+      activities = JSON.parse(logContent);
+    } else {
+      // Fall back to legacy format (individual JSON objects)
+      activities = logContent
+        .split("\n")
+        .filter((line) => line.trim())
+        .map((line) => JSON.parse(line));
+    }
+
+    if (activities.length === 0) return null;
+
+    // Return the most recent entry
+    return activities[activities.length - 1];
   } catch (error) {
     console.error("Error reading recent activity log:", error);
     return null;
@@ -325,10 +338,20 @@ async function getActivitiesInTimeRange(
     if (await exists(logPath)) {
       try {
         const logContent = await Deno.readTextFile(logPath);
-        const entries = logContent
-          .split("\n")
-          .filter((line) => line.trim())
-          .map((line) => JSON.parse(line));
+        if (!logContent.trim()) continue;
+
+        let entries: any[] = [];
+
+        // Try to parse the content as a JSON array first (new format)
+        if (logContent.trim().startsWith("[")) {
+          entries = JSON.parse(logContent);
+        } else {
+          // Fall back to legacy format (individual JSON objects)
+          entries = logContent
+            .split("\n")
+            .filter((line) => line.trim())
+            .map((line) => JSON.parse(line));
+        }
 
         // Filter entries by timestamp
         const filteredEntries = entries.filter((entry) => {
@@ -758,9 +781,35 @@ async function logActivity(
     screenAnalysis: analysis,
   };
 
-  const logContent = JSON.stringify(logEntry, null, 2);
+  // Check if the log file exists
+  let activities: any[] = [];
+  if (await exists(logPath)) {
+    try {
+      // Read existing content
+      const existingContent = await Deno.readTextFile(logPath);
+      if (existingContent.trim()) {
+        // Try to parse as JSON array
+        if (existingContent.trim().startsWith("[")) {
+          activities = JSON.parse(existingContent);
+        } else {
+          // Handle legacy format (individual JSON objects)
+          activities = existingContent
+            .split("\n")
+            .filter((line) => line.trim())
+            .map((line) => JSON.parse(line));
+        }
+      }
+    } catch (error) {
+      console.error(`Error reading log file ${logPath}:`, error);
+      // If there's an error, we'll start with an empty array
+    }
+  }
 
-  await Deno.writeTextFile(logPath, logContent + "\n", { append: true });
+  // Add the new entry
+  activities.push(logEntry);
+
+  // Write the entire array back to the file
+  await Deno.writeTextFile(logPath, JSON.stringify(activities, null, 2));
   console.log(`Activity logged to ${logPath}`);
 }
 
