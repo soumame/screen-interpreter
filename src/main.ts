@@ -838,7 +838,7 @@ async function sendToObsidian(analysis: string): Promise<boolean> {
     const encodedAnalysis = encodeURIComponent(analysis);
 
     // Create the Obsidian advanced-uri command
-    const obsidianCommand = `open --background "obsidian://advanced-uri?vault=${OBSIDIAN_VAULT_NAME}&daily=true&mode=append&data=%23%23%23%20${currentTime}%0D%0A${encodedAnalysis}"`;
+    const obsidianCommand = `open --background "obsidian://advanced-uri?vault=${OBSIDIAN_VAULT_NAME}&daily=true&mode=append&openmode=silent&data=%23%23%23%20${currentTime}%0D%0A${encodedAnalysis}"`;
 
     console.log(obsidianCommand);
 
