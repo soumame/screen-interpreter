@@ -464,7 +464,7 @@ async function sendSummaryToObsidian(
     const encodedSummary = encodeURIComponent(summaryWithHeader);
 
     // Create the Obsidian advanced-uri command
-    const obsidianCommand = `open --background "obsidian://advanced-uri?vault=${OBSIDIAN_VAULT_NAME}&daily=true&mode=append&data=${encodedSummary}"`;
+    const obsidianCommand = `open --background "obsidian://advanced-uri?vault=${OBSIDIAN_VAULT_NAME}&daily=true&mode=append&openmode=silent&data=${encodedSummary}"`;
 
     console.log(obsidianCommand);
 
